@@ -1,0 +1,42 @@
+# ==== STM32CubeIDE ====
+Debug/
+Release/
+build/
+
+# Eclipse metadata
+.settings/
+.cproject
+.project
+
+# Generated files
+*.o
+*.d
+*.elf
+*.map
+*.hex
+*.bin
+*.axf
+*.su
+
+# CubeMX backups
+*.ioc.old
+
+# Logs
+*.log
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# VS Code (if used)
+.vscode/
+
+# Temporary files
+*.tmp
+*.bak
+
+# CMSIS pack files
+*.pack
+
+# STM32CubeIDE local history
+.metadata/
