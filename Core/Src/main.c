@@ -54,6 +54,18 @@ static RAK_Handle rak;
 
 static uint32_t next_send_ms = 0;
 
+/* Battery-efficient schedule: sample only in a window before send */
+#define SEND_INTERVAL_MS    60000u   /* 1 min between sends */
+#define WINDOW_MS           30000u   /* sample sensors in last 30 s before send */
+#define WINDOW_WARMUP_MS    2000u    /* warmup inside window before counting (baseline/radar settle) */
+#define SAMPLE_INTERVAL_MS  100u     /* record car state every 100 ms for majority vote */
+#define IDLE_LOOP_MS        500u     /* when idle, service RAK then sleep 500 ms */
+
+/* Majority vote: count car_present over the window; send 1 if > 50% */
+static uint32_t window_car_count;
+static uint32_t window_sample_count;
+static uint32_t window_last_sample_ms;
+
 /* Battery: Li-ion 3000 mV empty, 4200 mV full -> 0..100% */
 #define BAT_MV_EMPTY  3000u
 #define BAT_MV_FULL   4200u
@@ -125,7 +137,10 @@ int main(void)
   RAK_Cfg cfg = { .huart = &hlpuart1 };
   RAK_Init(&rak, &cfg);
 
-  next_send_ms = HAL_GetTick() + 60000;
+  next_send_ms = HAL_GetTick() + SEND_INTERVAL_MS;
+  window_car_count = 0;
+  window_sample_count = 0;
+  window_last_sample_ms = 0;
 
   printf("Fusion car detector start\r\n");
 
@@ -152,60 +167,78 @@ int main(void)
 
 		/* USER CODE BEGIN 3 */
 
-		// Progress init/join and parse UART events
-		RAK_Task(&rak);
+		uint32_t now = HAL_GetTick();
+		int32_t time_until_send = (int32_t)(next_send_ms - now);
+		bool in_window = (time_until_send > 0 && time_until_send <= (int32_t)WINDOW_MS);
 
-		// Every 1 min (or 5 s retry on send failure), send car + battery if joined
-		if ((int32_t)(HAL_GetTick() - next_send_ms) >= 0) {
-			uint16_t bat_raw = 0;
-			uint32_t bat_mV = BAT_ADC_Read_mV(&bat_raw);
-			uint8_t battery_pct = battery_mV_to_percent(bat_mV);
+		/* Idle: before sampling window — only service RAK, no sensor reads */
+		if (!in_window) {
+			RAK_Task(&rak);
 
-			if (RAK_IsJoined(&rak)) {
-				uint8_t car = CarDetector_GetCarPresent(&g_cd) ? 1 : 0;
-				RAK_Status st = RAK_SendStatus(&rak, car, battery_pct);
+			/* Send time reached */
+			if (time_until_send <= 0) {
+				uint16_t bat_raw = 0;
+				uint32_t bat_mV = BAT_ADC_Read_mV(&bat_raw);
+				uint8_t battery_pct = battery_mV_to_percent(bat_mV);
 
-				if (st == RAK_OK) {
-					next_send_ms += 60000; /* 1 min */
+				if (RAK_IsJoined(&rak)) {
+					/* Use majority vote over the last window (or 0 if no samples) */
+					uint8_t car = (window_sample_count > 0 && window_car_count > window_sample_count / 2) ? 1 : 0;
+					RAK_Status st = RAK_SendStatus(&rak, car, battery_pct);
+
+					if (st == RAK_OK) {
+						next_send_ms += SEND_INTERVAL_MS;
+					} else {
+						next_send_ms += 5000;
+					}
 				} else {
-					/* BUSY / TIMEOUT / AT_FAIL: retry in 5 s */
-					next_send_ms += 5000;
+					next_send_ms += SEND_INTERVAL_MS;
 				}
+				window_car_count = 0;
+				window_sample_count = 0;
+				window_last_sample_ms = 0;
 			} else {
-				next_send_ms += 60000; /* not joined, avoid spamming */
+				HAL_Delay(IDLE_LOOP_MS);
+			}
+			continue;
+		}
+
+		/* In sampling window: run sensors */
+		RAK_Task(&rak);
+		CarDetector_Tick(&g_cd, now);
+
+		/* Warmup: run sensors a few seconds before counting (baseline/radar settle) */
+		int32_t time_since_window_start = (int32_t)(now - (next_send_ms - WINDOW_MS));
+		bool warmup_done = (time_since_window_start >= (int32_t)WINDOW_WARMUP_MS);
+
+		if (warmup_done && (now - window_last_sample_ms >= SAMPLE_INTERVAL_MS)) {
+			window_last_sample_ms = now;
+			window_sample_count++;
+			if (CarDetector_GetCarPresent(&g_cd)) {
+				window_car_count++;
 			}
 		}
 
-		uint32_t now = HAL_GetTick();
-				CarDetector_Tick(&g_cd, now);
+		/* Debug print only during window, every 200 ms */
+		if (now - last_print >= 200) {
+			last_print = now;
+			MagneticSensorSample_t ms;
+			(void) MagneticSensor_GetLatest(&g_cd.mag, &ms);
+			bool mag_detected = (MagneticSensor_GetCarPresent(&g_cd.mag) != 0);
+			bool rad_detected = g_cd.radar.car_detected;
+			bool car_confirmed = CarDetector_GetCarPresent(&g_cd);
+			printf("t=%lu mag=%u rad=%u CONFIRMED=%u | samples=%lu car_count=%lu | radRaw=%u intra=%ld dist=%ldmm\r\n",
+					(unsigned long) now,
+					(unsigned) mag_detected,
+					(unsigned) rad_detected,
+					(unsigned) car_confirmed,
+					(unsigned long) window_sample_count,
+					(unsigned long) window_car_count,
+					(unsigned) g_cd.radar.presence_detected,
+					(long) g_cd.radar.intra_score_x1000,
+					(long) g_cd.radar.distance_mm);
+		}
 
-				if (now - last_print >= 200) {
-					last_print = now;
-
-					MagneticSensorSample_t ms;
-					(void) MagneticSensor_GetLatest(&g_cd.mag, &ms);
-
-					// Get individual sensor states
-					bool mag_detected = (MagneticSensor_GetCarPresent(&g_cd.mag) != 0);
-					bool rad_detected = g_cd.radar.car_detected;
-					bool car_confirmed = CarDetector_GetCarPresent(&g_cd);
-
-					// Enhanced logging with more radar details
-					printf("t=%lu mag=%u rad=%u CONFIRMED=%u | radRaw=%u intra=%ld inter=%ld dist=%ldmm sat=%u del=%u dB=%ld\r\n",
-							(unsigned long) now,
-							(unsigned) mag_detected,              // Magnetic sensor detection
-							(unsigned) rad_detected,               // Radar filtered detection
-							(unsigned) car_confirmed,              // Final confirmed car presence (both sensors)
-							(unsigned) g_cd.radar.presence_detected,  // Raw Acconeer detection
-							(long) g_cd.radar.intra_score_x1000,
-							(long) g_cd.radar.inter_score_x1000,
-							(long) g_cd.radar.distance_mm,
-							(unsigned) g_cd.radar.data_saturated,
-							(unsigned) g_cd.radar.frame_delayed,
-							(long) ms.delta_mag_uT_x100);
-				}
-
-		// Small delay to reduce CPU load (still responsive)
 		HAL_Delay(5);
 	}
   /* USER CODE END 3 */

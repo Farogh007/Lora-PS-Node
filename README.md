@@ -68,9 +68,14 @@ LoRa parking-sensor node: fuses radar and magnetometer to detect car presence an
    `CarDetector_Tick` combines radar and mag: both ON → immediate present; one ON → confirm after `on_confirm_ms`; both OFF for `off_confirm_ms` → clear. Output: `CarDetector_GetCarPresent()`.
 
 3. **Uplink**  
-   Every 1 min (or 5 s on send failure), if joined: read car (fusion) and battery % (ADC), then `RAK_SendStatus(&rak, car, battery_pct)` → 2-byte payload on FPort 10.
+   Every 1 min (or 5 s on send failure), if joined: send **averaged** car state (majority vote over the sampling window) and battery % → 2-byte payload on FPort 10.
 
-4. **Log**  
+4. **Battery-efficient schedule**  
+   - **Idle (first ~30 s of each minute):** Only `RAK_Task` runs; **no sensor reads**. Loop sleeps 500 ms between RAK polls.  
+   - **Sampling window (last 30 s before send):** Sensors run (mag 50 Hz, radar 10 Hz). First 2 s is warmup (no counting). Every 100 ms, car present is recorded; at send time **majority vote** (car = 1 if &gt; 50% of samples had car) gives a stable “last minute” state.  
+   - Constants in `main.c`: `SEND_INTERVAL_MS`, `WINDOW_MS`, `WINDOW_WARMUP_MS`, `SAMPLE_INTERVAL_MS`, `IDLE_LOOP_MS`.
+
+5. **Log**  
    `_write` → `Log_Write`; when logging enabled, all `printf` and `Log_Printf` go to USART1.
 
 ---
@@ -103,6 +108,7 @@ LoRa parking-sensor node: fuses radar and magnetometer to detect car presence an
 - **Send interval:** 60 s when send succeeds.
 - **Retry:** 5 s when send fails (RAK_ERR_BUSY, RAK_ERR_TIMEOUT, RAK_ERR_AT_FAIL).
 - **Not joined:** Next attempt in 60 s (no spam).
+- **Sensors:** Only active in the last 30 s before each send (`WINDOW_MS` in main.c); rest of the time the MCU idles with 500 ms delays (no radar/I2C), reducing battery use.
 
 ---
 
