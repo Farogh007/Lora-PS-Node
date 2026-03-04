@@ -30,6 +30,7 @@
 #include "battery_adc.h"
 #include "car_detector.h"
 #include "log.h"
+#include <stdio.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
