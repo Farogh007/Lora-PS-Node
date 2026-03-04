@@ -86,9 +86,11 @@ void RAK_OnUartRxCplt(RAK_Handle *h);
 // Query joined state
 bool RAK_IsJoined(const RAK_Handle *h);
 
-// Send car detected status (0/1). Non-blocking: it schedules the TX and returns quickly.
+// Send status payload: 2 bytes [car, battery].
+// car: 0 or 1 (car present). battery: 0-100 (percent) or 0-255.
+// Non-blocking: schedules TX and returns quickly.
 // Returns BUSY if previous TX still in progress.
-RAK_Status RAK_SendCarDetected(RAK_Handle *h, uint8_t detected);
+RAK_Status RAK_SendStatus(RAK_Handle *h, uint8_t car, uint8_t battery);
 
 // Optional: force rejoin (non-blocking, handled in RAK_Task)
 void RAK_RequestRejoin(RAK_Handle *h);

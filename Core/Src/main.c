@@ -29,7 +29,7 @@
 #include "RAK.h"
 #include "battery_adc.h"
 #include "car_detector.h"
-#include <stdlib.h>
+#include "log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -54,9 +54,15 @@ static RAK_Handle rak;
 
 static uint32_t next_send_ms = 0;
 
-static uint8_t rand_bit(void)
+/* Battery: Li-ion 3000 mV empty, 4200 mV full -> 0..100% */
+#define BAT_MV_EMPTY  3000u
+#define BAT_MV_FULL   4200u
+
+static uint8_t battery_mV_to_percent(uint32_t bat_mV)
 {
-    return (uint8_t)(rand() & 0x01);
+    if (bat_mV <= BAT_MV_EMPTY) return 0;
+    if (bat_mV >= BAT_MV_FULL) return 100;
+    return (uint8_t)((bat_mV - BAT_MV_EMPTY) * 100u / (BAT_MV_FULL - BAT_MV_EMPTY));
 }
 
 static CarDetector_t g_cd;
@@ -71,7 +77,7 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 int _write(int file, char *ptr, int len) {
-	HAL_UART_Transmit(&huart1, (uint8_t*) ptr, len, HAL_MAX_DELAY);
+	Log_Write(ptr, len);
 	return len;
 }
 /* USER CODE END 0 */
@@ -112,7 +118,9 @@ int main(void)
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   BAT_ADC_Init(&hadc1);
-  srand(HAL_GetTick());
+
+  Log_Init(&huart1);
+  Log_Enable();
 
   RAK_Cfg cfg = { .huart = &hlpuart1 };
   RAK_Init(&rak, &cfg);
@@ -147,25 +155,24 @@ int main(void)
 		// Progress init/join and parse UART events
 		RAK_Task(&rak);
 
-		// Every 5 seconds, send car status if joined
-		if ((int32_t) (HAL_GetTick() - next_send_ms) >= 0) {
-			next_send_ms += 60000; // 1 Min
-
-			// Read battery (gated measurement through SIP32431)
+		// Every 1 min (or 5 s retry on send failure), send car + battery if joined
+		if ((int32_t)(HAL_GetTick() - next_send_ms) >= 0) {
 			uint16_t bat_raw = 0;
 			uint32_t bat_mV = BAT_ADC_Read_mV(&bat_raw);
+			uint8_t battery_pct = battery_mV_to_percent(bat_mV);
 
 			if (RAK_IsJoined(&rak)) {
-				uint8_t car = rand_bit(); // 0/1
-				RAK_Status st = RAK_SendCarDetected(&rak, car);
+				uint8_t car = CarDetector_GetCarPresent(&g_cd) ? 1 : 0;
+				RAK_Status st = RAK_SendStatus(&rak, car, battery_pct);
 
-				// If busy, you can just skip; next tick will try again
-				// If not joined, driver will rejoin in background
-				(void) st;
+				if (st == RAK_OK) {
+					next_send_ms += 60000; /* 1 min */
+				} else {
+					/* BUSY / TIMEOUT / AT_FAIL: retry in 5 s */
+					next_send_ms += 5000;
+				}
 			} else {
-				// Not joined -> driver will attempt join automatically.
-				// Optionally force a rejoin:
-				// RAK_RequestRejoin(&rak);
+				next_send_ms += 60000; /* not joined, avoid spamming */
 			}
 		}
 

@@ -338,20 +338,19 @@ void RAK_Task(RAK_Handle *h)
     h->next_action_ms = now_ms() + 1000;
 }
 
-RAK_Status RAK_SendCarDetected(RAK_Handle *h, uint8_t detected)
+RAK_Status RAK_SendStatus(RAK_Handle *h, uint8_t car, uint8_t battery)
 {
     if (!h) return RAK_ERR_PARAM;
 
     if (!h->joined) return RAK_ERR_NOT_JOINED;
     if (h->tx_in_progress || h->wait_ok) return RAK_ERR_BUSY;
 
-    detected = detected ? 1 : 0;
+    car = car ? 1 : 0;
 
-    char cmd[48];
-    // 1 byte payload: 00 or 01
-    snprintf(cmd, sizeof(cmd), "AT+SEND=%d:%02X", RAK_FPORT_CAR_STATUS, detected);
+    char cmd[64];
+    /* 2-byte payload: [car, battery] as hex */
+    snprintf(cmd, sizeof(cmd), "AT+SEND=%d:%02X%02X", RAK_FPORT_CAR_STATUS, car, battery);
 
-    // Send command and wait OK quickly; TX_DONE comes async
     send_cmd_wait_ok(h, cmd, 1200);
     h->tx_in_progress = true;
 
